@@ -389,7 +389,31 @@ pte_t *
 pgdir_walk(pde_t *pgdir, const void *va, int create)
 {
 	// Fill this function in
-	return NULL;
+  physaddr_t pt_addr;
+  PageInfo * new_page;
+  pte_t * pagetable;
+
+  assert(pgdir != NULL);
+  
+  if (pgdir[PDX(va)] & PTE_P == 0) {  
+    if (!create) {
+      return NULL;
+    }
+
+    new_page = page_alloc(ALLOC_ZERO);
+    if (new_page == NULL) {
+      return NULL;
+    }
+    new_page->ppref += 1;
+    
+    pgdir[PDX(va)] = page2pa(new_page) | PTE_U | PTE_W | PTE_P;
+  }
+
+  pt_addr = PTE_ADDR(pgdir[PDX(va)]);
+
+  pagetable = KADDR(pt_addr);
+  
+  return &pagetable[PTX(va)];
 }
 
 //
@@ -406,6 +430,18 @@ static void
 boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
 {
 	// Fill this function in
+  size_t num_pages;
+  pte_t * mpage;
+  int i;
+
+  assert(size % PGSIZE == 0 && va % PGSIZE == 0 && pa % PGSIZE == 0);
+  num_pages = size/PGSIZE;
+  
+  for (i = 0; i < num_pages; i++) {
+    mpage = pgdir_walk(pgdir, va + i * PGSIZE, 1);
+    assert(mpage != NULL);
+    *mpage = (pa + i * PGSIZE) | perm | PTE_P;
+  }  
 }
 
 //
