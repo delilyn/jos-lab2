@@ -169,7 +169,6 @@ mem_init(void)
 
 	check_page_free_list(1);
 	check_page_alloc();
-	panic("mem_init: This function is not finished\n");
 	check_page();
 
 	//////////////////////////////////////////////////////////////////////
@@ -182,6 +181,9 @@ mem_init(void)
 	//      (ie. perm = PTE_U | PTE_P)
 	//    - pages itself -- kernel RW, user NONE
 	// Your code goes here:
+	boot_map_region(kern_pgdir, UPAGES, ROUNDUP(npages*sizeof(struct PageInfo), PGSIZE), PADDR(pages), PTE_U | PTE_P);
+	boot_map_region(kern_pgdir, (uintptr_t)pages, ROUNDUP(npages*sizeof(struct PageInfo), PGSIZE), PADDR(pages), PTE_W | PTE_P);
+	
 
 	//////////////////////////////////////////////////////////////////////
 	// Use the physical memory that 'bootstack' refers to as the kernel
@@ -194,6 +196,7 @@ mem_init(void)
 	//       overwrite memory.  Known as a "guard page".
 	//     Permissions: kernel RW, user NONE
 	// Your code goes here:
+	boot_map_region(kern_pgdir, KSTACKTOP-KSTKSIZE, KSTKSIZE, PADDR(bootstack), PTE_W | PTE_P);
 
 	//////////////////////////////////////////////////////////////////////
 	// Map all of physical memory at KERNBASE.
@@ -203,9 +206,13 @@ mem_init(void)
 	// we just set up the mapping anyway.
 	// Permissions: kernel RW, user NONE
 	// Your code goes here:
+	uint32_t offset = 1 << 31;
+	boot_map_region(kern_pgdir, KERNBASE, offset - KERNBASE + offset, 0, PTE_W | PTE_P);
 
 	// Check that the initial page directory has been set up correctly.
 	check_kern_pgdir();
+
+	//panic("mem_init: This function is not finished\n");
 
 	// Switch from the minimal entry page directory to the full kern_pgdir
 	// page table we just created.	Our instruction pointer should be
@@ -390,12 +397,12 @@ pgdir_walk(pde_t *pgdir, const void *va, int create)
 {
 	// Fill this function in
   physaddr_t pt_addr;
-  PageInfo * new_page;
+  struct PageInfo * new_page;
   pte_t * pagetable;
 
   assert(pgdir != NULL);
   
-  if (pgdir[PDX(va)] & PTE_P == 0) {  
+  if ((pgdir[PDX(va)] & PTE_P) == 0) {  
     if (!create) {
       return NULL;
     }
@@ -404,7 +411,7 @@ pgdir_walk(pde_t *pgdir, const void *va, int create)
     if (new_page == NULL) {
       return NULL;
     }
-    new_page->ppref += 1;
+    new_page->pp_ref++;
     
     pgdir[PDX(va)] = page2pa(new_page) | PTE_U | PTE_W | PTE_P;
   }
@@ -438,7 +445,7 @@ boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm
   num_pages = size/PGSIZE;
   
   for (i = 0; i < num_pages; i++) {
-    mpage = pgdir_walk(pgdir, va + i * PGSIZE, 1);
+    mpage = pgdir_walk(pgdir, (const void *)(va + i * PGSIZE), 1);
     assert(mpage != NULL);
     *mpage = (pa + i * PGSIZE) | perm | PTE_P;
   }  
@@ -473,7 +480,31 @@ int
 page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 {
 	// Fill this function in
-	return 0;
+  pte_t * target_pte;
+  int mapped;
+  physaddr_t old_paddr, new_paddr;
+
+  target_pte = pgdir_walk(pgdir, va, 1);
+
+  if (target_pte == NULL) {
+    return -E_NO_MEM;
+  }
+
+  old_paddr = PTE_ADDR(*target_pte);
+  new_paddr = page2pa(pp);
+  mapped = *target_pte & PTE_P;
+
+  if (mapped && old_paddr != new_paddr) {
+    page_remove(pgdir, va);
+  }
+
+  if (!(mapped && old_paddr == new_paddr)) {
+    pp->pp_ref++;
+  }
+
+  *target_pte = new_paddr | perm | PTE_P;
+  
+  return 0;
 }
 
 //
@@ -491,7 +522,23 @@ struct PageInfo *
 page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
 {
 	// Fill this function in
-	return NULL;
+  pte_t * result_page;
+
+  result_page = pgdir_walk(pgdir, va, 0);
+
+  if (result_page == NULL) {
+    return NULL;
+  }
+
+  if ((*result_page & PTE_P) == 0) {
+    return NULL;
+  }
+
+  if (pte_store != NULL) {
+    *pte_store = result_page;
+  }
+
+  return pa2page(PTE_ADDR(*result_page));
 }
 
 //
@@ -513,6 +560,23 @@ void
 page_remove(pde_t *pgdir, void *va)
 {
 	// Fill this function in
+  struct PageInfo * target_page;
+  pte_t * target_pte;
+
+  target_page = page_lookup(pgdir, va, &target_pte);
+  
+  if (target_page == NULL) {
+    return;
+  }
+
+  assert(target_page->pp_ref > 0);
+
+  page_decref(target_page);
+
+  assert(target_pte != NULL);
+
+  *target_pte = 0;
+  tlb_invalidate(pgdir, va);  
 }
 
 //
